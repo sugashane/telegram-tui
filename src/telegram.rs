@@ -62,6 +62,12 @@ pub struct TgMessage {
 
 #[derive(Debug)]
 pub enum TelegramAction {
+    // Auth actions
+    RequestLoginCode { phone: String },
+    SubmitLoginCode { code: String },
+    SubmitTwoFaPassword { password: String },
+
+    // Normal actions
     LoadDialogs,
     LoadHistory { chat_id: i64, limit: usize },
     SendMessage { chat_id: i64, text: String, reply_to: Option<i32> },
@@ -73,6 +79,14 @@ pub enum TelegramAction {
 
 #[derive(Debug)]
 pub enum TelegramEvent {
+    // Auth events
+    AuthRequired,
+    LoginCodeSent,
+    LoginSuccess,
+    LoginNeedPassword,
+    LoginError(String),
+
+    // Normal events
     DialogsLoaded(Vec<TgDialog>),
     HistoryLoaded { chat_id: i64, messages: Vec<TgMessage> },
     NewMessage(TgMessage),
@@ -150,17 +164,18 @@ impl PeerCache {
 }
 
 // ---------------------------------------------------------------------------
-// Connect + authenticate
+// Connect (no authentication — login is handled via TUI actions)
 // ---------------------------------------------------------------------------
 
 /// Start everything: connect, create client, spawn pool runner and client task.
-/// Returns (Client, ActionTx, EventRx) — ready for the TUI to use.
+/// Returns (Client, is_authorized, ActionTx, EventRx).
+/// If `is_authorized` is false, the TUI should show a login screen and
+/// send auth actions (RequestLoginCode, SubmitLoginCode, etc.).
 pub async fn start(
     api_id: i32,
-    api_hash: &str,
-    phone: &str,
+    api_hash: String,
     session_path: &Path,
-) -> Result<(Client, ActionTx, EventRx)> {
+) -> Result<(Client, bool, ActionTx, EventRx)> {
     // Open session
     let session = Arc::new(
         SqliteSession::open(session_path)
@@ -180,61 +195,25 @@ pub async fn start(
     // Spawn the network I/O runner
     tokio::spawn(runner.run());
 
-    // Authenticate if needed
-    if !client.is_authorized().await? {
-        authenticate(&client, phone, api_hash).await?;
-    }
+    // Check auth status but don't authenticate here
+    let authorized = client.is_authorized().await?;
 
     // Set up action/event channels
     let (action_tx, action_rx) = mpsc::unbounded_channel::<TelegramAction>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<TelegramEvent>();
 
-    // Create update stream (consumes the private UpdatesLike receiver)
+    // Create update stream
     let update_stream = client
         .stream_updates(updates, UpdatesConfiguration::default())
         .await;
 
-    // Spawn our client task
+    // Spawn our client task (holds api_hash for login actions)
     let client_for_task = client.clone();
     tokio::spawn(async move {
-        run_client_task(client_for_task, update_stream, action_rx, event_tx).await;
+        run_client_task(client_for_task, api_hash, update_stream, action_rx, event_tx).await;
     });
 
-    Ok((client, action_tx, event_rx))
-}
-
-/// Interactive console authentication (before TUI starts).
-async fn authenticate(client: &Client, phone: &str, api_hash: &str) -> Result<()> {
-    println!("Requesting login code for {phone}...");
-    let token = client.request_login_code(phone, api_hash).await?;
-
-    println!("Enter the code you received:");
-    let mut code = String::new();
-    std::io::stdin().read_line(&mut code)?;
-    let code = code.trim();
-
-    match client.sign_in(&token, code).await {
-        Ok(_) => {
-            println!("Signed in successfully!");
-        }
-        Err(SignInError::PasswordRequired(password_token)) => {
-            println!("Two-factor authentication required.");
-            println!("Enter your 2FA password:");
-            let mut password = String::new();
-            std::io::stdin().read_line(&mut password)?;
-            client
-                .check_password(password_token, password.trim())
-                .await?;
-            println!("Signed in with 2FA successfully!");
-        }
-        Err(SignInError::SignUpRequired) => {
-            anyhow::bail!("This phone number is not registered with Telegram.");
-        }
-        Err(e) => {
-            anyhow::bail!("Sign in failed: {e}");
-        }
-    }
-    Ok(())
+    Ok((client, authorized, action_tx, event_rx))
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +222,16 @@ async fn authenticate(client: &Client, phone: &str, api_hash: &str) -> Result<()
 
 async fn run_client_task(
     client: Client,
+    api_hash: String,
     mut update_stream: UpdateStream,
     mut action_rx: ActionRx,
     event_tx: EventTx,
 ) {
+    use grammers_client::client::{LoginToken, PasswordToken};
+
     let mut cache = PeerCache::new();
+    let mut login_token: Option<LoginToken> = None;
+    let mut password_token: Option<PasswordToken> = None;
 
     let _ = event_tx.send(TelegramEvent::Connected);
 
@@ -255,6 +239,63 @@ async fn run_client_task(
         tokio::select! {
             action = action_rx.recv() => {
                 match action {
+                    // ── Auth actions ────────────────────────────────
+                    Some(TelegramAction::RequestLoginCode { phone }) => {
+                        match client.request_login_code(&phone, &api_hash).await {
+                            Ok(token) => {
+                                login_token = Some(token);
+                                let _ = event_tx.send(TelegramEvent::LoginCodeSent);
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(TelegramEvent::LoginError(
+                                    format!("Failed to request code: {e}")
+                                ));
+                            }
+                        }
+                    }
+                    Some(TelegramAction::SubmitLoginCode { code }) => {
+                        if let Some(token) = login_token.take() {
+                            match client.sign_in(&token, &code).await {
+                                Ok(_) => {
+                                    let _ = event_tx.send(TelegramEvent::LoginSuccess);
+                                }
+                                Err(SignInError::PasswordRequired(pt)) => {
+                                    password_token = Some(pt);
+                                    let _ = event_tx.send(TelegramEvent::LoginNeedPassword);
+                                }
+                                Err(SignInError::SignUpRequired) => {
+                                    let _ = event_tx.send(TelegramEvent::LoginError(
+                                        "This phone number is not registered with Telegram.".into()
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(TelegramEvent::LoginError(
+                                        format!("Sign in failed: {e}")
+                                    ));
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(TelegramEvent::LoginError(
+                                "No login code was requested. Please enter your phone number first.".into()
+                            ));
+                        }
+                    }
+                    Some(TelegramAction::SubmitTwoFaPassword { password }) => {
+                        if let Some(pt) = password_token.take() {
+                            match client.check_password(pt, &password).await {
+                                Ok(_) => {
+                                    let _ = event_tx.send(TelegramEvent::LoginSuccess);
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(TelegramEvent::LoginError(
+                                        format!("2FA check failed: {e}")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Normal actions ──────────────────────────────
                     Some(TelegramAction::LoadDialogs) => {
                         match load_dialogs(&client, &mut cache).await {
                             Ok(dialogs) => {

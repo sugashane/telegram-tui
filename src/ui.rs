@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -7,7 +7,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, ConversationFilter, FocusPane, Mode};
+use crate::app::{App, ConversationFilter, FocusPane, LoginPhase, Mode, Screen};
 use crate::config::ThemePalette;
 use crate::telegram::DialogKind;
 
@@ -16,6 +16,13 @@ use crate::telegram::DialogKind;
 // ---------------------------------------------------------------------------
 
 pub fn render(frame: &mut Frame, app: &App) {
+    match app.screen {
+        Screen::Login => render_login(frame, app),
+        Screen::Main => render_main(frame, app),
+    }
+}
+
+fn render_main(frame: &mut Frame, app: &App) {
     let pal = &app.palette;
     let size = frame.area();
 
@@ -47,6 +54,190 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.mode == Mode::ThemePicker {
         render_theme_picker(frame, app, pal, size);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Login screen
+// ---------------------------------------------------------------------------
+
+fn render_login(frame: &mut Frame, app: &App) {
+    let pal = &app.palette;
+    let size = frame.area();
+
+    // Clear background
+    frame.render_widget(Clear, size);
+    let bg = Block::default().style(Style::default().bg(pal.bg));
+    frame.render_widget(bg, size);
+
+    // Center a box on screen — 50 wide, 16 tall
+    let box_w = 50u16.min(size.width.saturating_sub(4));
+    let box_h = 16u16.min(size.height.saturating_sub(2));
+    let x = (size.width.saturating_sub(box_w)) / 2;
+    let y = (size.height.saturating_sub(box_h)) / 2;
+    let area = Rect::new(x, y, box_w, box_h);
+
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.border_focus))
+        .title(" telegram-tui ")
+        .title_alignment(Alignment::Center);
+    frame.render_widget(border, area);
+
+    let inner = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(2));
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(Span::styled(
+        "Welcome to telegram-tui",
+        Style::default().fg(pal.accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    match app.login_phase {
+        LoginPhase::EnteringPhone => {
+            lines.push(Line::from(Span::styled(
+                "Enter your phone number (with country code):",
+                Style::default().fg(pal.fg),
+            )));
+            lines.push(Line::from(""));
+
+            // Phone input with cursor
+            let phone_display = render_input_with_cursor(
+                &app.login_phone, app.login_cursor, pal, false,
+            );
+            lines.push(phone_display);
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Example: +15551234567",
+                Style::default().fg(pal.muted),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Enter", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to continue  ", Style::default().fg(pal.fg)),
+                Span::styled("Esc", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to quit", Style::default().fg(pal.fg)),
+            ]));
+        }
+        LoginPhase::WaitingForCode => {
+            lines.push(Line::from(Span::styled(
+                "Requesting login code...",
+                Style::default().fg(pal.accent),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "A code will be sent to your Telegram app.",
+                Style::default().fg(pal.fg),
+            )));
+        }
+        LoginPhase::EnteringCode => {
+            lines.push(Line::from(Span::styled(
+                "Enter the code from your Telegram app:",
+                Style::default().fg(pal.fg),
+            )));
+            lines.push(Line::from(""));
+
+            let code_display = render_input_with_cursor(
+                &app.login_code, app.login_cursor, pal, false,
+            );
+            lines.push(code_display);
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Check your other Telegram app for the code.",
+                Style::default().fg(pal.muted),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Enter", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to submit  ", Style::default().fg(pal.fg)),
+                Span::styled("Esc", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to go back", Style::default().fg(pal.fg)),
+            ]));
+        }
+        LoginPhase::EnteringPassword => {
+            lines.push(Line::from(Span::styled(
+                "Two-factor authentication required.",
+                Style::default().fg(pal.accent),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter your 2FA password:",
+                Style::default().fg(pal.fg),
+            )));
+            lines.push(Line::from(""));
+
+            // Show password as dots
+            let pw_display = render_input_with_cursor(
+                &app.login_password, app.login_cursor, pal, true,
+            );
+            lines.push(pw_display);
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Enter", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to submit  ", Style::default().fg(pal.fg)),
+                Span::styled("Esc", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(" to go back", Style::default().fg(pal.fg)),
+            ]));
+        }
+        LoginPhase::WaitingForAuth => {
+            lines.push(Line::from(Span::styled(
+                "Signing in...",
+                Style::default().fg(pal.accent),
+            )));
+        }
+    }
+
+    // Error display
+    if let Some(err) = &app.login_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            err.as_str(),
+            Style::default().fg(pal.error),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
+}
+
+/// Render an input field with a block cursor at the given position.
+fn render_input_with_cursor<'a>(
+    text: &str,
+    cursor: usize,
+    pal: &ThemePalette,
+    mask: bool,
+) -> Line<'a> {
+    let display: String = if mask {
+        "*".repeat(text.len())
+    } else {
+        text.to_string()
+    };
+
+    let (before, cursor_char, after) = if cursor < display.len() {
+        let before = display[..cursor].to_string();
+        let c = display[cursor..].chars().next().unwrap_or(' ');
+        let after = if cursor + c.len_utf8() < display.len() {
+            display[cursor + c.len_utf8()..].to_string()
+        } else {
+            String::new()
+        };
+        (before, c.to_string(), after)
+    } else {
+        (display.clone(), " ".to_string(), String::new())
+    };
+
+    Line::from(vec![
+        Span::styled(before, Style::default().fg(pal.fg)),
+        Span::styled(
+            cursor_char,
+            Style::default().fg(pal.bg).bg(pal.fg),
+        ),
+        Span::styled(after, Style::default().fg(pal.fg)),
+    ])
 }
 
 // ---------------------------------------------------------------------------

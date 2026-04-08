@@ -4,7 +4,7 @@ mod input;
 mod telegram;
 mod ui;
 
-use std::io::{self, Write};
+use std::io;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,18 +31,19 @@ async fn main() -> Result<()> {
         _ => {
             eprintln!("telegram-tui requires Telegram API credentials.");
             eprintln!();
-            eprintln!("1. Go to https://my.telegram.org and log in");
-            eprintln!("2. Navigate to 'API development tools'");
-            eprintln!("3. Create an application to get your api_id and api_hash");
-            eprintln!("4. Add them to your config file:");
+            eprintln!("This is a one-time developer setup:");
+            eprintln!("  1. Go to https://my.telegram.org and log in");
+            eprintln!("  2. Navigate to 'API development tools'");
+            eprintln!("  3. Create an application to get your api_id and api_hash");
+            eprintln!("  4. Add them to your config file:");
             eprintln!();
             let cfg_path = config::config_path();
             eprintln!("   {}", cfg_path.display());
             eprintln!();
             eprintln!("   api_id = 12345");
             eprintln!("   api_hash = \"your_api_hash_here\"");
-            eprintln!("   phone = \"+15551234567\"");
             eprintln!();
+            eprintln!("After this, login is just phone number + code from Telegram.");
 
             // Create config dir and default config if it doesn't exist
             let dir = config_dir();
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
             if !cfg_path.exists() {
                 let default_config = AppConfig::default();
                 default_config.save()?;
+                eprintln!();
                 eprintln!("   (Created default config file for you to edit)");
             }
 
@@ -57,18 +59,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    let phone = config.phone.clone().unwrap_or_else(|| {
-        eprint!("Phone number (with country code, e.g. +15551234567): ");
-        io::stdout().flush().unwrap();
-        let mut s = String::new();
-        io::stdin().read_line(&mut s).unwrap();
-        s.trim().to_string()
-    });
-
-    // ── Connect to Telegram (authenticates if needed, spawns background task) ──
+    // ── Connect to Telegram ────────────────────────────────────────────
     let sess_path = session_path();
-    let (client, action_tx, mut event_rx) =
-        telegram::start(api_id, &api_hash, &phone, &sess_path)
+    let (client, is_authorized, action_tx, mut event_rx) =
+        telegram::start(api_id, api_hash, &sess_path)
             .await
             .context("Failed to connect to Telegram")?;
 
@@ -80,7 +74,8 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // ── Run TUI event loop ─────────────────────────────────────────────
-    let mut app = App::new(action_tx.clone());
+    // If not authorized, App starts on the login screen automatically
+    let mut app = App::new(action_tx.clone(), is_authorized);
     let result = run_app(&mut terminal, &mut app, &mut event_rx).await;
 
     // ── Cleanup ────────────────────────────────────────────────────────
@@ -116,11 +111,14 @@ async fn run_app(
         // Draw
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        // Set cursor style based on mode
-        let cursor_style = match app.mode {
-            app::Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
-            app::Mode::Normal => cursor::SetCursorStyle::SteadyBlock,
-            _ => cursor::SetCursorStyle::SteadyBlock,
+        // Set cursor style based on mode/screen
+        let cursor_style = match app.screen {
+            app::Screen::Login => cursor::SetCursorStyle::BlinkingBar,
+            app::Screen::Main => match app.mode {
+                app::Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
+                app::Mode::Normal => cursor::SetCursorStyle::SteadyBlock,
+                _ => cursor::SetCursorStyle::SteadyBlock,
+            },
         };
         execute!(terminal.backend_mut(), cursor_style)?;
 

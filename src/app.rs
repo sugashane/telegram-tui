@@ -13,6 +13,21 @@ use crate::telegram::{
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Login,
+    Main,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPhase {
+    EnteringPhone,
+    WaitingForCode,
+    EnteringCode,
+    EnteringPassword,
+    WaitingForAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Insert,
@@ -106,6 +121,15 @@ pub struct App {
     // -- Telegram client channel --
     pub action_tx: ActionTx,
 
+    // -- Screen state --
+    pub screen: Screen,
+    pub login_phase: LoginPhase,
+    pub login_phone: String,
+    pub login_code: String,
+    pub login_password: String,
+    pub login_cursor: usize,
+    pub login_error: Option<String>,
+
     // -- Core state --
     pub mode: Mode,
     pub focus: FocusPane,
@@ -177,13 +201,27 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(action_tx: ActionTx) -> Self {
+    pub fn new(action_tx: ActionTx, is_authorized: bool) -> Self {
         let config = AppConfig::load();
         let state = AppState::load();
         let palette = config.theme.palette();
 
+        // Pre-fill phone from config if available
+        let login_phone = config.phone.clone().unwrap_or_default();
+        let phone_len = login_phone.len();
+
+        let screen = if is_authorized { Screen::Main } else { Screen::Login };
+
         let app = Self {
             action_tx,
+            screen,
+            login_phase: LoginPhase::EnteringPhone,
+            login_phone,
+            login_code: String::new(),
+            login_password: String::new(),
+            login_cursor: phone_len,
+            login_error: None,
+
             mode: Mode::Normal,
             focus: FocusPane::Chats,
             filter: ConversationFilter::All,
@@ -243,8 +281,10 @@ impl App {
             compose_pending_delete: false,
         };
 
-        // Request initial dialog load
-        let _ = app.action_tx.send(TelegramAction::LoadDialogs);
+        // Only load dialogs if already authorized
+        if is_authorized {
+            let _ = app.action_tx.send(TelegramAction::LoadDialogs);
+        }
         app
     }
 
@@ -316,6 +356,58 @@ impl App {
 
     pub fn handle_telegram_event(&mut self, event: TelegramEvent) {
         match event {
+            // ── Auth events ────────────────────────────────────────
+            TelegramEvent::AuthRequired => {
+                self.screen = Screen::Login;
+                self.login_phase = LoginPhase::EnteringPhone;
+                self.login_error = None;
+            }
+            TelegramEvent::LoginCodeSent => {
+                self.login_phase = LoginPhase::EnteringCode;
+                self.login_code.clear();
+                self.login_cursor = 0;
+                self.login_error = None;
+            }
+            TelegramEvent::LoginSuccess => {
+                self.screen = Screen::Main;
+                self.login_error = None;
+                self.connected = true;
+                self.status = "Logged in successfully".into();
+                // Save phone to config for next time
+                self.config.phone = Some(self.login_phone.clone());
+                let _ = self.config.save();
+                // Load dialogs now that we're authenticated
+                let _ = self.action_tx.send(TelegramAction::LoadDialogs);
+            }
+            TelegramEvent::LoginNeedPassword => {
+                self.login_phase = LoginPhase::EnteringPassword;
+                self.login_password.clear();
+                self.login_cursor = 0;
+                self.login_error = None;
+            }
+            TelegramEvent::LoginError(msg) => {
+                self.login_error = Some(msg);
+                // Go back to the appropriate input phase
+                match self.login_phase {
+                    LoginPhase::WaitingForCode => {
+                        self.login_phase = LoginPhase::EnteringPhone;
+                        self.login_cursor = self.login_phone.len();
+                    }
+                    LoginPhase::WaitingForAuth => {
+                        // Could be code or password failure
+                        if !self.login_code.is_empty() {
+                            self.login_phase = LoginPhase::EnteringCode;
+                            self.login_cursor = self.login_code.len();
+                        } else {
+                            self.login_phase = LoginPhase::EnteringPhone;
+                            self.login_cursor = self.login_phone.len();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // ── Normal events ──────────────────────────────────────
             TelegramEvent::Connected => {
                 self.connected = true;
                 self.status = "Connected to Telegram".into();
@@ -390,6 +482,101 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
+    // Login screen input
+    // -----------------------------------------------------------------------
+
+    fn on_login_key(&mut self, key: KeyEvent) {
+        // Get mutable ref to the active input field and cursor
+        let (input, cursor) = match self.login_phase {
+            LoginPhase::EnteringPhone => (&mut self.login_phone, &mut self.login_cursor),
+            LoginPhase::EnteringCode => (&mut self.login_code, &mut self.login_cursor),
+            LoginPhase::EnteringPassword => (&mut self.login_password, &mut self.login_cursor),
+            LoginPhase::WaitingForCode | LoginPhase::WaitingForAuth => return,
+        };
+
+        match key.code {
+            KeyCode::Enter => {
+                match self.login_phase {
+                    LoginPhase::EnteringPhone => {
+                        if !self.login_phone.trim().is_empty() {
+                            self.login_phase = LoginPhase::WaitingForCode;
+                            self.login_error = None;
+                            let _ = self.action_tx.send(TelegramAction::RequestLoginCode {
+                                phone: self.login_phone.trim().to_string(),
+                            });
+                        }
+                    }
+                    LoginPhase::EnteringCode => {
+                        if !self.login_code.trim().is_empty() {
+                            self.login_phase = LoginPhase::WaitingForAuth;
+                            self.login_error = None;
+                            let _ = self.action_tx.send(TelegramAction::SubmitLoginCode {
+                                code: self.login_code.trim().to_string(),
+                            });
+                        }
+                    }
+                    LoginPhase::EnteringPassword => {
+                        if !self.login_password.is_empty() {
+                            self.login_phase = LoginPhase::WaitingForAuth;
+                            self.login_error = None;
+                            let _ = self.action_tx.send(TelegramAction::SubmitTwoFaPassword {
+                                password: self.login_password.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Char(c) => {
+                input.insert(*cursor, c);
+                *cursor += 1;
+            }
+            KeyCode::Backspace => {
+                if *cursor > 0 {
+                    input.remove(*cursor - 1);
+                    *cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if *cursor < input.len() {
+                    input.remove(*cursor);
+                }
+            }
+            KeyCode::Left => {
+                if *cursor > 0 {
+                    *cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if *cursor < input.len() {
+                    *cursor += 1;
+                }
+            }
+            KeyCode::Home => {
+                *cursor = 0;
+            }
+            KeyCode::End => {
+                *cursor = input.len();
+            }
+            KeyCode::Esc => {
+                // On phone screen, quit. On code/password, go back to phone.
+                match self.login_phase {
+                    LoginPhase::EnteringPhone => {
+                        self.should_quit = true;
+                    }
+                    LoginPhase::EnteringCode | LoginPhase::EnteringPassword => {
+                        self.login_phase = LoginPhase::EnteringPhone;
+                        self.login_cursor = self.login_phone.len();
+                        self.login_error = None;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Key dispatch
     // -----------------------------------------------------------------------
 
@@ -397,6 +584,12 @@ impl App {
         // Global quit
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
+            return;
+        }
+
+        // Login screen has its own input handling
+        if self.screen == Screen::Login {
+            self.on_login_key(key);
             return;
         }
 
