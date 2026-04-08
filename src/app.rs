@@ -433,12 +433,26 @@ impl App {
                     self.message_scroll_offset = 0;
                 }
             }
-            TelegramEvent::NewMessage(msg) => {
+            TelegramEvent::NewMessage(mut msg) => {
                 if self.loaded_chat_id == Some(msg.chat_id) {
                     // Deduplicate: our own sent messages arrive via both
                     // MessageSent and the update stream
                     if !self.messages.iter().any(|m| m.id == msg.id) {
+                        // Resolve "Unknown" sender from dialog list
+                        if msg.sender_name == "Unknown" {
+                            if let Some(dialog) = self.dialogs.iter().find(|d| d.id == msg.chat_id) {
+                                if dialog.kind == DialogKind::User {
+                                    msg.sender_name = dialog.title.clone();
+                                }
+                            }
+                        }
+                        // Auto-scroll if user was at the bottom
+                        let was_at_bottom = self.messages.is_empty()
+                            || self.selected_message >= self.messages.len().saturating_sub(1);
                         self.messages.push(msg.clone());
+                        if was_at_bottom {
+                            self.selected_message = self.messages.len() - 1;
+                        }
                     }
                 }
                 // Update dialog's last message
