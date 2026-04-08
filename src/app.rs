@@ -435,7 +435,11 @@ impl App {
             }
             TelegramEvent::NewMessage(msg) => {
                 if self.loaded_chat_id == Some(msg.chat_id) {
-                    self.messages.push(msg.clone());
+                    // Deduplicate: our own sent messages arrive via both
+                    // MessageSent and the update stream
+                    if !self.messages.iter().any(|m| m.id == msg.id) {
+                        self.messages.push(msg.clone());
+                    }
                 }
                 // Update dialog's last message
                 if let Some(dialog) = self.dialogs.iter_mut().find(|d| d.id == msg.chat_id) {

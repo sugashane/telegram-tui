@@ -124,8 +124,11 @@ fn convert_message(msg: &grammers_client::message::Message) -> TgMessage {
         .sender()
         .and_then(|p| p.name().map(|s| s.to_string()))
         .unwrap_or_else(|| "Unknown".into());
-    let sender_id = msg.sender().map(|p| peer_to_i64(&p));
-    let chat_id = msg.peer().map(|p| peer_to_i64(&p)).unwrap_or(0);
+    let sender_id = msg
+        .sender_id()
+        .map(|pid| pid.bot_api_dialog_id());
+    // Use peer_id() which always resolves, not peer() which requires cache
+    let chat_id = msg.peer_id().bot_api_dialog_id();
     TgMessage {
         id: msg.id(),
         chat_id,
