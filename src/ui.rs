@@ -381,6 +381,7 @@ fn render_messages(frame: &mut Frame, app: &App, pal: &ThemePalette, area: Rect)
 
     // Build message lines
     let inner = block.inner(area);
+    let wrap_width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
     let mut msg_line_starts: Vec<usize> = Vec::new(); // index into `lines` for each message
 
@@ -431,7 +432,7 @@ fn render_messages(frame: &mut Frame, app: &App, pal: &ThemePalette, area: Rect)
 
         lines.push(Line::from(header_spans));
 
-        // Message body
+        // Message body — wrap long lines to fit the pane width
         let body_style = if is_selected && !in_visual {
             Style::default().fg(pal.selection_fg).bg(pal.selection_bg)
         } else if in_visual {
@@ -442,11 +443,19 @@ fn render_messages(frame: &mut Frame, app: &App, pal: &ThemePalette, area: Rect)
             Style::default().fg(pal.fg)
         };
 
-        for text_line in msg.text.lines() {
-            lines.push(Line::styled(text_line.to_string(), body_style));
-        }
         if msg.text.is_empty() {
             lines.push(Line::styled("[no text]", Style::default().fg(pal.muted)));
+        } else {
+            for text_line in msg.text.lines() {
+                if wrap_width == 0 || text_line.len() <= wrap_width {
+                    lines.push(Line::styled(text_line.to_string(), body_style));
+                } else {
+                    // Word-wrap long lines
+                    for wrapped in wrap_text(text_line, wrap_width) {
+                        lines.push(Line::styled(wrapped, body_style));
+                    }
+                }
+            }
         }
 
         // Blank separator
@@ -808,4 +817,59 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+// ---------------------------------------------------------------------------
+// Text wrapping helper
+// ---------------------------------------------------------------------------
+
+/// Word-wrap a string to fit within `max_width` characters.
+/// Breaks at word boundaries when possible, otherwise hard-breaks.
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_inclusive(' ') {
+        if current_line.is_empty() {
+            if word.len() > max_width {
+                // Hard-break a very long word
+                let mut remaining = word;
+                while remaining.len() > max_width {
+                    result.push(remaining[..max_width].to_string());
+                    remaining = &remaining[max_width..];
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        } else if current_line.len() + word.len() > max_width {
+            result.push(current_line);
+            if word.len() > max_width {
+                let mut remaining = word;
+                while remaining.len() > max_width {
+                    result.push(remaining[..max_width].to_string());
+                    remaining = &remaining[max_width..];
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        } else {
+            current_line.push_str(word);
+        }
+    }
+
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+
+    result
 }

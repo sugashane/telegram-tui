@@ -929,13 +929,21 @@ impl App {
                                 chat_id: id,
                                 limit: 50,
                             });
+                            // Mark as read when opening a chat
+                            let _ = self.action_tx.send(TelegramAction::MarkRead { chat_id: id });
+                            if let Some(dialog) = self.dialogs.iter_mut().find(|d| d.id == id) {
+                                dialog.unread_count = 0;
+                            }
                             self.focus = FocusPane::Messages;
                         }
                     }
                     FocusPane::Messages => {
-                        // Mark as read (best-effort)
+                        // Mark as read
                         if let Some(chat_id) = self.loaded_chat_id {
                             let _ = self.action_tx.send(TelegramAction::MarkRead { chat_id });
+                            if let Some(dialog) = self.dialogs.iter_mut().find(|d| d.id == chat_id) {
+                                dialog.unread_count = 0;
+                            }
                         }
                     }
                     FocusPane::Compose => {}
@@ -1075,7 +1083,10 @@ impl App {
             }
             Command::ReadAll => {
                 for d in &mut self.dialogs {
-                    d.unread_count = 0;
+                    if d.unread_count > 0 {
+                        let _ = self.action_tx.send(TelegramAction::MarkRead { chat_id: d.id });
+                        d.unread_count = 0;
+                    }
                 }
                 self.status = "All marked as read".into();
             }
