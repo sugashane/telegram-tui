@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("telegram-tui")
 }
 
