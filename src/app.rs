@@ -151,6 +151,8 @@ pub struct App {
     pub messages: Vec<TgMessage>,
     pub selected_message: usize,
     pub message_scroll_offset: usize,
+    /// Message IDs that arrived via live updates (unread until marked)
+    pub unread_message_ids: HashSet<i32>,
 
     // -- Compose --
     pub compose_input: String,
@@ -240,6 +242,7 @@ impl App {
             messages: Vec::new(),
             selected_message: 0,
             message_scroll_offset: 0,
+            unread_message_ids: HashSet::new(),
 
             compose_input: state.compose_draft.clone(),
             compose_cursor: state.compose_draft.len(),
@@ -445,6 +448,10 @@ impl App {
                                     msg.sender_name = dialog.title.clone();
                                 }
                             }
+                        }
+                        // Track as unread if not our own message
+                        if !msg.outgoing {
+                            self.unread_message_ids.insert(msg.id);
                         }
                         // Auto-scroll if user was at the bottom
                         let was_at_bottom = self.messages.is_empty()
@@ -925,6 +932,7 @@ impl App {
                             self.loaded_chat_id = Some(id);
                             self.messages.clear();
                             self.selected_message = 0;
+                            self.unread_message_ids.clear();
                             let _ = self.action_tx.send(TelegramAction::LoadHistory {
                                 chat_id: id,
                                 limit: 50,
@@ -944,6 +952,7 @@ impl App {
                             if let Some(dialog) = self.dialogs.iter_mut().find(|d| d.id == chat_id) {
                                 dialog.unread_count = 0;
                             }
+                            self.unread_message_ids.clear();
                         }
                     }
                     FocusPane::Compose => {}

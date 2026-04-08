@@ -403,8 +403,16 @@ fn render_messages(frame: &mut Frame, app: &App, pal: &ThemePalette, area: Rect)
 
         let is_search_match = app.search_matches_set.contains(&i);
 
-        // Author header
-        let author_color = pal.authors[i % pal.authors.len()];
+        // Author header — consistent color per sender
+        let author_color = if msg.outgoing {
+            pal.accent // "me" always gets accent color
+        } else {
+            // Hash sender name for a stable color
+            let hash = msg.sender_name
+                .bytes()
+                .fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+            pal.authors[hash % pal.authors.len()]
+        };
         let timestamp = if app.config.show_timestamps {
             format!(
                 " [{}]",
@@ -428,6 +436,15 @@ fn render_messages(frame: &mut Frame, app: &App, pal: &ThemePalette, area: Rect)
 
         if msg.outgoing {
             header_spans.push(Span::styled(" (you)", Style::default().fg(pal.muted)));
+        }
+
+        // Unread indicator
+        if app.unread_message_ids.contains(&msg.id) {
+            header_spans.push(Span::raw(" "));
+            header_spans.push(Span::styled(
+                "\u{25c6}",
+                Style::default().fg(pal.unread),
+            ));
         }
 
         lines.push(Line::from(header_spans));
